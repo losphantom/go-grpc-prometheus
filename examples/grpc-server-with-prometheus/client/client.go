@@ -7,7 +7,7 @@ import (
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
 
-	pb "github.com/grpc-ecosystem/go-grpc-prometheus/examples/grpc-server-with-prometheus/protobuf"
+	pb "github.com/losphantom/go-grpc-prometheus/examples/grpc-server-with-prometheus/protobuf"
 )
 
 func main() {

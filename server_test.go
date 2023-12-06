@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	pb_testproto "github.com/grpc-ecosystem/go-grpc-prometheus/examples/testproto"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
@@ -23,6 +23,8 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+
+	pb_testproto "github.com/losphantom/go-grpc-prometheus/examples/testproto"
 )
 
 var (
@@ -245,7 +247,7 @@ func fetchPrometheusLines(t *testing.T, metricName string, matchingLabelValues .
 	resp := httptest.NewRecorder()
 	req, err := http.NewRequest("GET", "/", nil)
 	require.NoError(t, err, "failed creating request for Prometheus handler")
-	prometheus.Handler().ServeHTTP(resp, req)
+	promhttp.Handler().ServeHTTP(resp, req)
 	reader := bufio.NewReader(resp.Body)
 	ret := []string{}
 	for {

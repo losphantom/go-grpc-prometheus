@@ -1,9 +1,13 @@
 package grpc_prometheus
 
 import (
+	"net"
+
 	prom "github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 )
 
@@ -30,22 +34,22 @@ func NewServerMetrics(counterOpts ...CounterOption) *ServerMetrics {
 			opts.apply(prom.CounterOpts{
 				Name: "grpc_server_started_total",
 				Help: "Total number of RPCs started on the server.",
-			}), []string{"grpc_type", "grpc_service", "grpc_method"}),
+			}), []string{"grpc_type", "grpc_service", "grpc_method", "grpc_remote"}),
 		serverHandledCounter: prom.NewCounterVec(
 			opts.apply(prom.CounterOpts{
 				Name: "grpc_server_handled_total",
 				Help: "Total number of RPCs completed on the server, regardless of success or failure.",
-			}), []string{"grpc_type", "grpc_service", "grpc_method", "grpc_code"}),
+			}), []string{"grpc_type", "grpc_service", "grpc_method", "grpc_code", "grpc_remote"}),
 		serverStreamMsgReceived: prom.NewCounterVec(
 			opts.apply(prom.CounterOpts{
 				Name: "grpc_server_msg_received_total",
 				Help: "Total number of RPC stream messages received on the server.",
-			}), []string{"grpc_type", "grpc_service", "grpc_method"}),
+			}), []string{"grpc_type", "grpc_service", "grpc_method", "grpc_remote"}),
 		serverStreamMsgSent: prom.NewCounterVec(
 			opts.apply(prom.CounterOpts{
 				Name: "grpc_server_msg_sent_total",
 				Help: "Total number of gRPC stream messages sent by the server.",
-			}), []string{"grpc_type", "grpc_service", "grpc_method"}),
+			}), []string{"grpc_type", "grpc_service", "grpc_method", "grpc_remote"}),
 		serverHandledHistogramEnabled: false,
 		serverHandledHistogramOpts: prom.HistogramOpts{
 			Name:    "grpc_server_handling_seconds",
@@ -67,7 +71,7 @@ func (m *ServerMetrics) EnableHandlingTimeHistogram(opts ...HistogramOption) {
 	if !m.serverHandledHistogramEnabled {
 		m.serverHandledHistogram = prom.NewHistogramVec(
 			m.serverHandledHistogramOpts,
-			[]string{"grpc_type", "grpc_service", "grpc_method"},
+			[]string{"grpc_type", "grpc_service", "grpc_method", "grpc_remote"},
 		)
 	}
 	m.serverHandledHistogramEnabled = true
@@ -102,7 +106,7 @@ func (m *ServerMetrics) Collect(ch chan<- prom.Metric) {
 // UnaryServerInterceptor is a gRPC server-side interceptor that provides Prometheus monitoring for Unary RPCs.
 func (m *ServerMetrics) UnaryServerInterceptor() func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
 	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
-		monitor := newServerReporter(m, Unary, info.FullMethod)
+		monitor := newServerReporter(m, Unary, info.FullMethod, getRemoteIp(ctx))
 		monitor.ReceivedMessage()
 		resp, err := handler(ctx, req)
 		st, _ := status.FromError(err)
@@ -117,7 +121,7 @@ func (m *ServerMetrics) UnaryServerInterceptor() func(ctx context.Context, req i
 // StreamServerInterceptor is a gRPC server-side interceptor that provides Prometheus monitoring for Streaming RPCs.
 func (m *ServerMetrics) StreamServerInterceptor() func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
 	return func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
-		monitor := newServerReporter(m, streamRPCType(info), info.FullMethod)
+		monitor := newServerReporter(m, streamRPCType(info), info.FullMethod, getRemoteIp(ss.Context()))
 		err := handler(srv, &monitoredServerStream{ss, monitor})
 		st, _ := status.FromError(err)
 		monitor.Handled(st.Code())
@@ -173,13 +177,47 @@ func preRegisterMethod(metrics *ServerMetrics, serviceName string, mInfo *grpc.M
 	methodName := mInfo.Name
 	methodType := string(typeFromMethodInfo(mInfo))
 	// These are just references (no increments), as just referencing will create the labels but not set values.
-	metrics.serverStartedCounter.GetMetricWithLabelValues(methodType, serviceName, methodName)
-	metrics.serverStreamMsgReceived.GetMetricWithLabelValues(methodType, serviceName, methodName)
-	metrics.serverStreamMsgSent.GetMetricWithLabelValues(methodType, serviceName, methodName)
+	metrics.serverStartedCounter.GetMetricWithLabelValues(methodType, serviceName, methodName, "127.0.0.1")
+	metrics.serverStreamMsgReceived.GetMetricWithLabelValues(methodType, serviceName, methodName, "127.0.0.1")
+	metrics.serverStreamMsgSent.GetMetricWithLabelValues(methodType, serviceName, methodName, "127.0.0.1")
 	if metrics.serverHandledHistogramEnabled {
-		metrics.serverHandledHistogram.GetMetricWithLabelValues(methodType, serviceName, methodName)
+		metrics.serverHandledHistogram.GetMetricWithLabelValues(methodType, serviceName, methodName, "127.0.0.1")
 	}
 	for _, code := range allCodes {
-		metrics.serverHandledCounter.GetMetricWithLabelValues(methodType, serviceName, methodName, code.String())
+		metrics.serverHandledCounter.GetMetricWithLabelValues(methodType, serviceName, methodName, code.String(), "127.0.0.1")
 	}
+}
+
+func getRemoteIp(ctx context.Context) string {
+	rip, ok := getRealAddr(ctx)
+	if ok {
+		return rip
+	}
+	p, ok := peer.FromContext(ctx)
+	if !ok {
+		return ""
+	}
+
+	if tcpAddr, ok := p.Addr.(*net.TCPAddr); ok {
+		return tcpAddr.IP.String()
+	} else {
+		return p.Addr.String()
+	}
+}
+
+func getRealAddr(ctx context.Context) (string, bool) {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return "", false
+	}
+
+	rips := md.Get("x-real-ip")
+	if len(rips) == 0 {
+		rips = md.Get("X-Forwarded-For")
+		if len(rips) == 0 {
+			return "", false
+		}
+	}
+
+	return rips[0], true
 }
